@@ -1,10 +1,11 @@
+// Modified for Goshawk BSV integration, 2026-11-16.
 plugins {
     id 'java-library'
     id 'org.gradlex.extra-java-module-info' version '1.13.1'
 }
 
 group = 'com.sparrowwallet'
-version = '1.1.0'
+version = '1.1.0-goshawk.1'
 
 repositories {
     mavenCentral()

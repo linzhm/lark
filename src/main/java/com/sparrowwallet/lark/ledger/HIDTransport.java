@@ -1,147 +1,116 @@
+// Modified for Goshawk BSV integration, 2026-11-16. Existing Lark Apache-2.0 terms retained.
 package com.sparrowwallet.lark.ledger;
 
-import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.lark.DeviceException;
 import org.hid4java.HidDevice;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongSupplier;
 
 public class HIDTransport extends AbstractTransport {
-    private static final Logger log = LoggerFactory.getLogger(HIDTransport.class);
+    interface Channel {
+        boolean open();
+        int write(byte[] packet);
+        int read(byte[] packet, int timeoutMs);
+        void close();
+        String error();
+    }
+    private final Channel channel;
+    private final int timeoutMs;
+    private final LongSupplier clock;
+    private final ReentrantLock exchangeLock = new ReentrantLock();
 
-    private final HidDevice hidDevice;
+    public HIDTransport(HidDevice device) { this(device, 120_000); }
 
-    private static final byte[] HEADER_BYTES = new byte[]{0x01, 0x01, 0x05};
-    private static final int CONTINUATION_TIMEOUT_MS = 10000;
+    public HIDTransport(HidDevice device, int timeoutMs) {
+        this(new Channel() {
+            public boolean open() { return !device.isClosed() || device.open(); }
+            public int write(byte[] packet) { return device.write(packet, 64, (byte)0); }
+            public int read(byte[] packet, int timeout) { return device.read(packet, timeout); }
+            public void close() { device.close(); }
+            public String error() { return device.getLastErrorMessage(); }
+        }, timeoutMs, System::nanoTime);
+    }
 
-    public HIDTransport(HidDevice hidDevice) {
-        this.hidDevice = hidDevice;
+    HIDTransport(Channel channel, int timeoutMs, LongSupplier clock) {
+        if(timeoutMs <= 0) throw new IllegalArgumentException("Positive response timeout required");
+        this.channel = channel;
+        this.timeoutMs = timeoutMs;
+        this.clock = clock;
         open();
     }
 
     @Override
     public void open() {
-        if(hidDevice.isClosed()) {
-            hidDevice.open();
-            hidDevice.setNonBlocking(true);
+        if(!channel.open()) {
+            channel.close();
+            throw new IllegalStateException("Cannot open Ledger. Close Ledger Wallet or other device sessions, then retry. " + channel.error());
         }
     }
 
-    /**
-     * Send data to device
-     *
-     * @param data data to send
-     * @return the number of bytes of data sent
-     */
     @Override
     public int send(byte[] data) throws DeviceException {
-        if(data == null) {
-            throw new IllegalArgumentException("data cannot be null");
+        if(data == null || data.length > 65535) throw new IllegalArgumentException("Invalid Ledger APDU length");
+        byte[] framed = ByteBuffer.allocate(2 + data.length).putShort((short)data.length).put(data).array();
+        int sequence = 0;
+        for(int offset = 0; offset < framed.length; offset += 59) {
+            byte[] packet = new byte[64];
+            packet[0] = 1; packet[1] = 1; packet[2] = 5;
+            packet[3] = (byte)(sequence >> 8); packet[4] = (byte)sequence++;
+            System.arraycopy(framed, offset, packet, 5, Math.min(59, framed.length - offset));
+            if(channel.write(packet) < 64) throw new DeviceException("Cannot write complete Ledger packet. Close other device sessions and retry. " + channel.error());
         }
-
-        if(log.isDebugEnabled()) {
-            log.debug("> " + Utils.bytesToHex(data));
-        }
-
-        ByteBuffer buffer = ByteBuffer.allocate(2 + data.length);
-        buffer.putShort((short)data.length);
-        buffer.put(data);
-        data = buffer.array();
-
-        int offset = 0;
-        int seqIdx = 0;
-        int length = 0;
-
-        while(offset < data.length) {
-            int headerLength = HEADER_BYTES.length + 2;
-            byte[] chunk  = Arrays.copyOfRange(data, offset, Math.min(offset + 64 - headerLength, data.length));
-            ByteBuffer buf = ByteBuffer.allocate(headerLength + chunk.length);
-            buf.put(HEADER_BYTES);
-            buf.putShort((short)seqIdx);
-            buf.put(chunk);
-
-            int written = hidDevice.write(buf.array(), 64, (byte)0);
-            if(written < 0) {
-                throw new DeviceException("Error writing to device: " + getLastErrorMessage());
-            }
-
-            length += chunk.length + 1;
-            offset += 64 - headerLength;
-            seqIdx++;
-        }
-
-        return length;
+        return data.length;
     }
 
     @Override
     public Response recv() throws DeviceException {
-        int seqIdx = 0;
-        hidDevice.setNonBlocking(false);
-        byte[] chunk = new byte[64];
-        int read = hidDevice.read(chunk);
-        hidDevice.setNonBlocking(true);
-        if(read <= 0) {
-            throw new DeviceException("Error reading from device: " + getLastErrorMessage());
-        }
-
-        checkHeader(chunk, seqIdx);
-        int dataLength = new BigInteger(1, Arrays.copyOfRange(chunk, 5, 7)).intValue();
-        byte[] data = Arrays.copyOfRange(chunk, 7, chunk.length);
-
-        while(data.length < dataLength) {
-            byte[] nextChunk = new byte[64];
-            int nextRead = hidDevice.read(nextChunk, CONTINUATION_TIMEOUT_MS);
-            if(nextRead < 0) {
-                throw new DeviceException("Error reading from device: " + getLastErrorMessage());
-            } else if(nextRead == 0) {
-                throw new DeviceException("Timed out waiting for response from device");
+        long deadline = clock.getAsLong() + timeoutMs * 1_000_000L;
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        int sequence = 0, length = -1;
+        while(length < 0 || bytes.size() < length) {
+            if(Thread.currentThread().isInterrupted()) throw new DeviceException("Ledger operation cancelled; finish or reject any pending request on the device");
+            long remaining = deadline - clock.getAsLong();
+            if(remaining <= 0) throw new DeviceException("Ledger response timed out. Finish or reject the request on the device, reconnect and retry");
+            byte[] packet = new byte[64];
+            int read = channel.read(packet, (int)Math.max(1, Math.min(100, remaining / 1_000_000)));
+            if(read < 0) throw new DeviceException("Ledger disconnected or unavailable. " + channel.error());
+            if(read == 0) continue;
+            int header = sequence == 0 ? 7 : 5;
+            if(read < header || read > 64 || packet[0] != 1 || packet[1] != 1 || packet[2] != 5 ||
+                    (packet[3] & 0xff) != sequence >> 8 || (packet[4] & 0xff) != (sequence & 0xff)) {
+                throw new DeviceException("Invalid Ledger response framing/sequence");
             }
-
-            checkHeader(nextChunk, ++seqIdx);
-            data = Utils.concat(data, Arrays.copyOfRange(nextChunk, 5, nextChunk.length));
+            if(sequence == 0) {
+                length = ((packet[5] & 0xff) << 8) | (packet[6] & 0xff);
+                if(length < 2) throw new DeviceException("Ledger response has no status word");
+            }
+            int payload = Math.min(64 - header, length - bytes.size());
+            if(read < header + payload) throw new DeviceException("Truncated Ledger response packet");
+            bytes.write(packet, header, payload);
+            sequence++;
         }
-
-        int sw = new BigInteger(1, Arrays.copyOfRange(data, dataLength - 2, dataLength)).intValue();
-        byte[] rdata = Arrays.copyOfRange(data, 0, dataLength - 2);
-
-        if(log.isDebugEnabled()) {
-            log.debug("< " + Utils.bytesToHex(rdata) + " " + Integer.toHexString(sw));
-        }
-
-        return new Response(sw, rdata);
-    }
-
-    private String getLastErrorMessage() {
-        String message = hidDevice.getLastErrorMessage();
-        return message == null || message.isEmpty() ? "Unknown error" : message;
-    }
-
-    private void checkHeader(byte[] chunk, int seqIdx) throws DeviceException {
-        if(chunk[0] != 0x01 || chunk[1] != 0x01 || chunk[2] != 0x05) {
-            throw new DeviceException("Unexpected header in response");
-        }
-        ByteBuffer buf = ByteBuffer.allocate(2);
-        buf.putShort((short)seqIdx);
-        if(!Arrays.equals(buf.array(), Arrays.copyOfRange(chunk, 3, 5))) {
-            throw new DeviceException("Unexpected sequence index in response");
-        }
+        byte[] response = bytes.toByteArray();
+        int status = ((response[length - 2] & 0xff) << 8) | (response[length - 1] & 0xff);
+        return new Response(status, Arrays.copyOf(response, length - 2));
     }
 
     @Override
     public Response exchange(byte[] data) throws DeviceException {
-        send(data);
-        return recv();
+        if(!exchangeLock.tryLock()) throw new DeviceException("Ledger is busy with another operation");
+        try {
+            send(data);
+            return recv();
+        } catch(DeviceException | RuntimeException e) {
+            channel.close();
+            throw e;
+        } finally { exchangeLock.unlock(); }
     }
 
     @Override
-    public void close() throws IOException {
-        if(hidDevice != null) {
-            hidDevice.close();
-        }
-    }
+    public void close() throws IOException { channel.close(); }
 }

@@ -1,3 +1,4 @@
+// Modified for Goshawk BSV integration, 2026-11-16.
 package com.sparrowwallet.lark.ledger.legacy;
 
 import com.sparrowwallet.drongo.KeyDerivation;
@@ -94,25 +95,22 @@ public class Btchip {
         byte[] pathBytes = parseBip32Path(path);
         APDUCommand apduCommand = new APDUCommand(BTCHIP_CLA, BTCHIP_INS_GET_WALLET_PUBLIC_KEY, showOnScreen ? 1 : 0, cashAddr ? 3 : (segwitNative ? 2 : (segwit ? 1 : 0)), pathBytes);
         byte[] response = transport.apduExchange(apduCommand).data();
-        int offset = 0;
-
-        // Extract the public key
-        int publicKeyLength = response[offset];
-        byte[] publicKey = new byte[publicKeyLength];
-        System.arraycopy(response, offset + 1, publicKey, 0, publicKeyLength);
-        result.put("publicKey", publicKey);
-        offset = offset + 1 + publicKeyLength;
-
-        // Extract the address
-        int addressLength = response[offset];
-        String address = new String(response, offset + 1, addressLength, StandardCharsets.UTF_8);
-        result.put("address", address.getBytes(StandardCharsets.UTF_8));
-        offset = offset + 1 + addressLength;
-
-        // Extract the chain code
-        byte[] chainCode = new byte[32];
-        System.arraycopy(response, offset, chainCode, 0, 32);
-        result.put("chainCode", chainCode);
+        try {
+            int offset = 0;
+            int publicKeyLength = response[offset++] & 0xff;
+            if((publicKeyLength != 33 && publicKeyLength != 65) || offset + publicKeyLength >= response.length) throw new IllegalArgumentException();
+            byte[] publicKey = Arrays.copyOfRange(response, offset, offset + publicKeyLength);
+            com.sparrowwallet.drongo.crypto.ECKey.fromPublicOnly(publicKey).getPubKey();
+            result.put("publicKey", publicKey);
+            offset += publicKeyLength;
+            int addressLength = response[offset++] & 0xff;
+            if(addressLength == 0 || offset + addressLength + 32 != response.length) throw new IllegalArgumentException();
+            result.put("address", Arrays.copyOfRange(response, offset, offset + addressLength));
+            offset += addressLength;
+            result.put("chainCode", Arrays.copyOfRange(response, offset, offset + 32));
+        } catch(RuntimeException e) {
+            throw new DeviceException("Malformed Ledger public-key response", e);
+        }
 
         return result;
     }
@@ -234,7 +232,9 @@ public class Btchip {
         }
         VarInt outputsLen = new VarInt(outputList.size());
         ByteBuffer buf = ByteBuffer.allocate(4 + outputsLen.getOriginalSizeInBytes());
-        buf.put(new byte[] { (byte)version, 0x00, 0x00, 0x00 });
+        byte[] versionBytes = new byte[4];
+        Utils.uint32ToByteArrayLE(version, versionBytes, 0);
+        buf.put(versionBytes);
         buf.put(outputsLen.encode());
         APDUCommand apduCommand = new APDUCommand(BTCHIP_CLA, BTCHIP_INS_HASH_INPUT_START, 0, p2, buf.array());
         transport.apduExchange(apduCommand);
@@ -254,17 +254,16 @@ public class Btchip {
                 script = new Script(new byte[0]);
             }
 
-            byte[] value = (output.get("trustedInput") != null ? (byte[])output.get("value") : new byte[0]);
-            VarInt scriptLen = new VarInt(script.getProgram().length);
-            buf = ByteBuffer.allocate(1 + 1 + value.length + scriptLen.getOriginalSizeInBytes());
-            if(output.get("trustedInput") != null) {
-                buf.put((byte)0x01);
-            } else if(output.get("witness") != null) {
-                buf.put((byte)0x02);
-            } else {
-                buf.put((byte)0x00);
+            boolean trusted = Boolean.TRUE.equals(output.get("trustedInput"));
+            boolean witness = Boolean.TRUE.equals(output.get("witness"));
+            byte[] value = (byte[])output.get("value");
+            if(value == null || (trusted && (value.length == 0 || value.length > 255)) || (!trusted && value.length != (witness ? 44 : 36))) {
+                throw new DeviceException("Invalid Ledger input context");
             }
-            buf.put((byte)value.length);
+            VarInt scriptLen = new VarInt(script.getProgram().length);
+            buf = ByteBuffer.allocate(1 + (trusted ? 1 : 0) + value.length + scriptLen.getOriginalSizeInBytes());
+            buf.put((byte)(trusted ? 0x01 : witness ? 0x02 : 0x00));
+            if(trusted) buf.put((byte)value.length);
             buf.put(value);
             buf.put(scriptLen.encode());
             apduCommand = new APDUCommand(BTCHIP_CLA, BTCHIP_INS_HASH_INPUT_START, 0x80, 0, buf.array());
@@ -272,7 +271,7 @@ public class Btchip {
 
             int offset = 0;
             while(offset < script.getProgram().length) {
-                int blockLength = 255;
+                int blockLength = 251;
                 int dataLength;
                 if((offset + blockLength) < script.getProgram().length) {
                     dataLength = blockLength;
@@ -380,7 +379,29 @@ public class Btchip {
         return result;
     }
 
+    /** Full output review with no fallback after rejection, timeout, or malformed response. */
+    public void finalizeBsvOutputs(Transaction transaction) throws DeviceException {
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        stream.writeBytes(new VarInt(transaction.getOutputs().size()).encode());
+        transaction.getOutputs().forEach(output -> stream.writeBytes(output.bitcoinSerialize()));
+        byte[] outputs = stream.toByteArray();
+        byte[] response = new byte[0];
+        for(int offset = 0; offset < outputs.length; offset += scriptBlockLength) {
+            int end = Math.min(offset + scriptBlockLength, outputs.length);
+            response = transport.apduExchange(new APDUCommand(BTCHIP_CLA, BTCHIP_INS_HASH_INPUT_FINALIZE_FULL,
+                    end == outputs.length ? 0x80 : 0, 0, Arrays.copyOfRange(outputs, offset, end))).data();
+        }
+        if(response.length < 2 || 1 + (response[0] & 0xff) >= response.length) throw new DeviceException("Malformed Ledger output confirmation");
+        if(response[1 + (response[0] & 0xff)] != 0) throw new DeviceException("Unsupported Ledger external authentication request");
+    }
+
     public byte[] untrustedHashSign(String path, String pin, long locktime, SigHash sigHash) throws DeviceException {
+        return untrustedHashSign(path, pin, locktime, sigHash.intValue());
+    }
+
+    /** Explicit raw sighash for BCH/BSV; existing Bitcoin callers retain their typed overload. */
+    public byte[] untrustedHashSign(String path, String pin, long locktime, int sigHash) throws DeviceException {
+        if(sigHash < 0 || sigHash > 255) throw new IllegalArgumentException("Invalid sighash byte");
         byte[] pathBytes = parseBip32Path(path);
         byte[] pinBytes = pin.getBytes(StandardCharsets.UTF_8);
 
@@ -389,11 +410,12 @@ public class Btchip {
         buf.put((byte)pinBytes.length);
         buf.put(pinBytes);
         buf.putInt((int)locktime);
-        buf.put(sigHash.value);
+        buf.put((byte)sigHash);
 
         APDUCommand apduCommand = new APDUCommand(BTCHIP_CLA, BTCHIP_INS_HASH_SIGN, 0, 0, buf.array());
         Transport.Response response = transport.apduExchange(apduCommand);
         byte[] responseData = response.data();
+        if(responseData.length < 9) throw new DeviceException("Truncated Ledger signature");
         responseData[0] = 0x30;
         return responseData;
     }

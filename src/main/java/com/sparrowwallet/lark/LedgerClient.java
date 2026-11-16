@@ -1,3 +1,4 @@
+// Modified for Goshawk BSV integration, 2026-11-16.
 package com.sparrowwallet.lark;
 
 import com.sparrowwallet.drongo.*;
@@ -8,6 +9,7 @@ import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.psbt.PSBTInput;
 import com.sparrowwallet.drongo.wallet.WalletModel;
 import com.sparrowwallet.lark.ledger.*;
+import com.sparrowwallet.lark.bsv.*;
 import com.sparrowwallet.lark.ledger.wallet.MultisigWalletPolicy;
 import com.sparrowwallet.lark.ledger.wallet.WalletPolicy;
 import org.hid4java.HidDevice;
@@ -28,23 +30,55 @@ public class LedgerClient extends HardwareClient {
     private Map<OutputDescriptor, byte[]> walletRegistrations = new HashMap<>();
 
     public LedgerClient(HidDevice hidDevice) throws DeviceException {
-        if(LedgerModel.getDeviceIds().stream().anyMatch(deviceId -> deviceId.getVendorId() == hidDevice.getVendorId() && deviceId.getProductId() == hidDevice.getProductId() >> 8) &&
+        int productModel = hidDevice.getProductId() >= 0x1000 ? hidDevice.getProductId() >> 8 : hidDevice.getProductId();
+        if(LedgerModel.getDeviceIds().stream().anyMatch(deviceId -> deviceId.getVendorId() == hidDevice.getVendorId() && deviceId.getProductId() == productModel) &&
                 (hidDevice.getUsagePage() == 0xFFA0 || hidDevice.getInterfaceNumber() == 0)) {
             this.hidDevice = hidDevice;
-            this.ledgerModel = LedgerModel.getLedgerModel(hidDevice.getProductId() >> 8);
+            this.ledgerModel = LedgerModel.getLedgerModel(productModel);
         } else {
             throw new DeviceException("Not a Ledger");
         }
     }
 
-    private LedgerDevice getLedgerDevice(HidDevice hidDevice) throws DeviceException {
+    BsvLedgerDevice openBsvDevice() throws DeviceException {
+        HIDTransport transport = new HIDTransport(hidDevice);
         try {
-            NewLedgerDevice newLedgerDevice = new NewLedgerDevice(new HIDTransport(hidDevice));
-            LedgerDevice.LedgerVersion ledgerVersion = newLedgerDevice.getVersion();
-            return ledgerVersion.isLegacy() ? new LegacyLedgerDevice(new HIDTransport(hidDevice), ledgerVersion) : newLedgerDevice;
+            LedgerDevice.LedgerVersion version = new NewLedgerDevice(transport).getVersion();
+            return new BsvLedgerDevice(transport, version, ledgerModel);
         } catch(Exception e) {
+            try { transport.close(); } catch(Exception ignored) { }
             throw new DeviceException(e.getMessage(), e);
         }
+    }
+
+    void switchBsvApp(boolean openBitcoinCash) throws DeviceException {
+        try(HIDTransport transport = new HIDTransport(hidDevice, 10000)) {
+            APDUCommand command = openBitcoinCash
+                    ? new APDUCommand(0xe0, 0xd8, 0, 0, "Bitcoin Cash".getBytes(java.nio.charset.StandardCharsets.US_ASCII))
+                    : new APDUCommand(0xb0, 0xa7, 0, 0);
+            try { transport.apduExchange(command); }
+            catch(LedgerTransportException e) { throw e; } // Rejection/locked status is never treated as a disconnect.
+            catch(DeviceException e) { /* App switching may disconnect USB; session must verify the expected app. */ }
+        } catch(java.io.IOException e) { throw new DeviceException("Could not close Ledger transport", e); }
+    }
+
+    BsvDeviceInfo bsvStatus() {
+        String identity = ledgerModel.getWalletModel().name() + ":" +
+                (hidDevice.getSerialNumber() == null || hidDevice.getSerialNumber().isBlank() ? hidDevice.getPath() : hidDevice.getSerialNumber());
+        String id = Sha256Hash.of(identity.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+        try(HIDTransport transport = new HIDTransport(hidDevice, 5000)) {
+            LedgerDevice.LedgerVersion version = new NewLedgerDevice(transport).getVersion();
+            return new BsvDeviceInfo(getPath(), getModel().toString(), id, version.name().equals("Bitcoin Cash") ? "ready" : "wrong_app",
+                    version.name(), version.version().toString(), "Account pairing is checked separately before signing");
+        } catch(LedgerResponseException e) {
+            return new BsvDeviceInfo(getPath(), getModel().toString(), id, (e.getCode() == 0x5515 || e.getCode() == 0x6982) ? "locked" : "unavailable", "", "", e.getMessage());
+        } catch(Exception e) {
+            return new BsvDeviceInfo(getPath(), getModel().toString(), id, "unavailable", "", "", e.getMessage());
+        }
+    }
+
+    private LedgerDevice getLedgerDevice(HidDevice hidDevice) throws DeviceException {
+        return LedgerDevice.openBitcoin(new HIDTransport(hidDevice));
     }
 
     @Override

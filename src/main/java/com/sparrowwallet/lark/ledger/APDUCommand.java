@@ -1,3 +1,4 @@
+// Modified for Goshawk BSV integration, 2026-11-16.
 package com.sparrowwallet.lark.ledger;
 
 import java.util.Arrays;
@@ -24,6 +25,7 @@ public class APDUCommand {
     }
 
     public APDUCommand(int cla, int ins, int p1, int p2, byte[] data) {
+        if(data.length > 255) throw new IllegalArgumentException("Ledger short APDU data exceeds 255 bytes");
         apdu = new byte[5 + data.length];
         apdu[0] = (byte) cla;
         apdu[1] = (byte) ins;

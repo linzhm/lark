@@ -1,3 +1,4 @@
+// Modified for Goshawk BSV integration, 2026-11-16.
 open module com.sparrowwallet.lark {
     requires co.nstant.in.cbor;
     requires com.fazecast.jSerialComm;
@@ -10,6 +11,7 @@ open module com.sparrowwallet.lark {
     requires org.usb4java;
     requires com.fasterxml.jackson.databind;
     exports com.sparrowwallet.lark;
+    exports com.sparrowwallet.lark.bsv;
     exports com.sparrowwallet.lark.bitbox02;
     exports com.sparrowwallet.lark.trezor;
 }

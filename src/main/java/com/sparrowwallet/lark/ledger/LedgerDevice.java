@@ -1,3 +1,4 @@
+// Modified for Goshawk BSV integration, 2026-11-16.
 package com.sparrowwallet.lark.ledger;
 
 import com.sparrowwallet.drongo.ExtendedKey;
@@ -26,6 +27,19 @@ public abstract class LedgerDevice implements Closeable {
         this.transport = transport;
     }
 
+    /** Selects the Bitcoin protocol while retaining ownership of one transport. */
+    public static LedgerDevice openBitcoin(Transport transport) throws DeviceException {
+        try {
+            NewLedgerDevice modern = new NewLedgerDevice(transport);
+            LedgerVersion version = modern.getVersion();
+            if(version.name().equals("Bitcoin Cash")) throw new DeviceException("Bitcoin Cash requires the explicit BSV API, not Bitcoin PSBT signing");
+            return version.isLegacy() ? new LegacyLedgerDevice(transport, version) : modern;
+        } catch(Exception e) {
+            try { transport.close(); } catch(IOException ignored) { }
+            throw new DeviceException(e.getMessage(), e);
+        }
+    }
+
     /**
      * Queries the hardware wallet for the currently running app's name, version and state flags.
      *
@@ -39,48 +53,32 @@ public abstract class LedgerDevice implements Closeable {
             throw new LedgerResponseException(response, DefaultInsType.GET_VERSION);
         }
 
-        String name = "";
-        Version version = null;
-        byte[] flags = new byte[0];
+        return parseVersion(response.data());
+    }
 
-        byte[] data = response.data();
-        int cursor = 0;
-
-        byte format = data[0];
-        cursor++;
-
+    public static LedgerVersion parseVersion(byte[] data) throws DeviceException {
+        if(data.length < 3 || data[0] != 1) throw new DeviceException("Invalid Ledger app identity");
         try {
-            VarInt nameLen = new VarInt(data, cursor);
-            cursor += nameLen.getOriginalSizeInBytes();
-            name = new String(data, cursor, cursor + (int)nameLen.value, StandardCharsets.UTF_8);
-            cursor += (int)nameLen.value;
-        } catch(Exception e) {
-            //ignore
+            int offset = 1;
+            int nameLength = data[offset++] & 0xff;
+            if(nameLength == 0 || offset + nameLength >= data.length) throw new IllegalArgumentException();
+            String name = new String(data, offset, nameLength, StandardCharsets.US_ASCII);
+            offset += nameLength;
+            int versionLength = data[offset++] & 0xff;
+            if(versionLength == 0 || offset + versionLength > data.length) throw new IllegalArgumentException();
+            String version = new String(data, offset, versionLength, StandardCharsets.US_ASCII);
+            if(!version.matches("[0-9]+\\.[0-9]+\\.[0-9]+")) throw new IllegalArgumentException();
+            offset += versionLength;
+            byte[] flags = new byte[0];
+            if(offset < data.length) {
+                int flagLength = data[offset++] & 0xff;
+                if(offset + flagLength != data.length) throw new IllegalArgumentException();
+                flags = Arrays.copyOfRange(data, offset, data.length);
+            }
+            return new LedgerVersion(name, new Version(version), flags);
+        } catch(RuntimeException e) {
+            throw new DeviceException("Malformed Ledger app identity", e);
         }
-
-        try {
-            VarInt verLen = new VarInt(data, cursor);
-            cursor += verLen.getOriginalSizeInBytes();
-            String ver = new String(data, cursor, (int)verLen.value, StandardCharsets.UTF_8);
-            version = new Version(ver);
-            cursor += (int)verLen.value;
-        } catch(Exception e) {
-            //ignore
-        }
-
-        try {
-            VarInt flagsLen = new VarInt(data, cursor);
-            cursor += flagsLen.getOriginalSizeInBytes();
-            flags = Arrays.copyOfRange(data, cursor, cursor + (int)flagsLen.value);
-        } catch(Exception e) {
-            //ignore
-        }
-
-        if(format != 0x01 || name.isEmpty() || version == null) {
-            throw new DeviceException("Invalid format returned by GET_VERSION");
-        }
-
-        return new LedgerVersion(name, version, flags);
     }
 
     public abstract String getMasterFingerprint() throws DeviceException;
@@ -114,7 +112,7 @@ public abstract class LedgerDevice implements Closeable {
 
     public record LedgerVersion(String name, Version version, byte[] state) {
         public boolean isLegacy() {
-            return version.compareTo(new Version("2.0.99")) < 0 || name.contains("Legacy");
+            return name.equals("Bitcoin Cash") || version.compareTo(new Version("2.0.99")) < 0 || name.contains("Legacy");
         }
     }
 
