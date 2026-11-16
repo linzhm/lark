@@ -17,3 +17,10 @@ are preserved. Modified upstream Java files carry a dated modification notice.
 - Add offline tests and independently generated BitcoinX oracle fixtures.
 
 See `docs/bsv-ledger.md` for scope, reference commits and physical-test limitations.
+
+## 2026-11-16 correction
+
+P2SH recovery was removed; all BSV inputs require P2PKH or bare multisig. ForkID
+hashing now uses the maintained Drongo BSV implementation, not a witness API.
+Goshawk's existing hardware entry now calls this BSV API. Root fingerprint import
+requests the actual value from a paired device and never fabricates one.

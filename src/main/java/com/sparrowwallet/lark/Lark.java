@@ -75,6 +75,10 @@ public class Lark {
         }
     }
 
+    public String getBsvMasterFingerprint(String devicePath, BsvAccount account) throws DeviceException {
+        return bsvOperation(devicePath, device -> { device.pair(account); return device.getMasterFingerprint(); });
+    }
+
     public BsvAccount getBsvAccount(String devicePath, String accountPath) throws DeviceException {
         return bsvOperation(devicePath, device -> device.readAccount(accountPath));
     }

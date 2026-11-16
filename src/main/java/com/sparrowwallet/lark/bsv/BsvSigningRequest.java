@@ -53,15 +53,8 @@ public final class BsvSigningRequest {
             }
             Script locking = new Script(Utils.hexToBytes(lockingScript));
             Script signing = new Script(Utils.hexToBytes(signingScript));
-            boolean p2sh = ScriptType.P2SH.isScriptType(locking);
-            if(p2sh) {
-                if(!ScriptType.MULTISIG.isScriptType(signing) ||
-                        !Arrays.equals(ScriptType.P2SH.getOutputScript(signing).getProgram(), locking.getProgram())) {
-                    throw new IllegalArgumentException("P2SH requires the matching multisig redeem script");
-                }
-            } else if(!lockingScript.equals(signingScript)) {
-                throw new IllegalArgumentException("Signing script does not match previous output");
-            }
+            BsvTransaction.requireSigningScript(locking);
+            if(!lockingScript.equals(signingScript)) throw new IllegalArgumentException("Signing script must equal the previous output script");
             if(ScriptType.P2PKH.isScriptType(signing)) {
                 if(publicKeys.size() != 1 || !Arrays.equals(signing.getPubKeyHash(), key(publicKeys.getFirst()).getPubKeyHash())) {
                     throw new IllegalArgumentException("P2PKH public key does not match script");
@@ -78,7 +71,6 @@ public final class BsvSigningRequest {
         }
 
         public Script script() { return new Script(Utils.hexToBytes(signingScript)); }
-        public boolean p2sh() { return ScriptType.P2SH.isScriptType(new Script(Utils.hexToBytes(lockingScript))); }
         public int threshold() { return ScriptType.P2PKH.isScriptType(script()) ? 1 : ScriptType.MULTISIG.getThreshold(script()); }
     }
 
@@ -92,7 +84,7 @@ public final class BsvSigningRequest {
 
     public BsvSigningRequest(Transaction transaction, List<Input> inputs, List<Target> targets,
                              List<Signature> existingSignatures) {
-        requireNonWitness(transaction);
+        BsvTransaction.requireTransaction(transaction);
         if(transaction.getInputs().isEmpty() || transaction.getOutputs().isEmpty() || transaction.isCoinBase()) {
             throw new IllegalArgumentException("A spending transaction with inputs and outputs is required");
         }
@@ -160,7 +152,7 @@ public final class BsvSigningRequest {
         Transaction tx = transaction();
         if((sighash & 0x1f) == 3 && index >= tx.getOutputs().size()) throw new IllegalArgumentException("SINGLE requires a corresponding output");
         // ForkID 0 uses this preimage algorithm. The transaction remains non-witness.
-        return tx.hashForWitnessSignature(index, inputs.get(index).script().getProgram(), inputs.get(index).value(), (byte)sighash);
+        return BsvTransaction.signatureHash(tx, index, inputs.get(index).script(), inputs.get(index).value(), sighash);
     }
 
     public void verify(Signature signature) {
@@ -206,7 +198,6 @@ public final class BsvSigningRequest {
                     String signature = signatures.get(new Slot(i, pub));
                     if(signature != null && count++ < input.threshold()) chunks.add(ScriptChunk.fromData(Utils.hexToBytes(signature)));
                 }
-                if(input.p2sh()) chunks.add(ScriptChunk.fromData(input.script().getProgram()));
             }
             tx.getInputs().get(i).setScriptBytes(new Script(chunks).getProgram());
         }

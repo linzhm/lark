@@ -71,8 +71,6 @@ public final class BsvLedgerDevice extends LegacyLedgerDevice {
         for(TransactionOutput output : tx.getOutputs()) {
             if(!ScriptType.P2PKH.isScriptType(output.getScript())) throw new DeviceException("This BSV adapter currently reviews P2PKH outputs only");
         }
-        boolean anyP2sh = request.inputs().stream().anyMatch(BsvSigningRequest.Input::p2sh);
-        if(anyP2sh && !request.inputs().stream().allMatch(BsvSigningRequest.Input::p2sh)) throw new DeviceException("Mixed P2SH and regular inputs are unsupported by this Ledger route");
         for(BsvSigningRequest.Input input : request.inputs()) {
             if(input.script().getProgram().length > 8192) throw new DeviceException("Signing script exceeds host operation budget");
         }

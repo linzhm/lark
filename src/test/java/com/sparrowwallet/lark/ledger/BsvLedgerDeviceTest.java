@@ -56,7 +56,7 @@ class BsvLedgerDeviceTest {
     }
 
     @Test void trustedParentsPartialAndMultisigUseExplicitForkIdAndFullVersion() throws Exception {
-        for(int fixture = 0; fixture < 3; fixture++) {
+        for(int fixture = 0; fixture < 2; fixture++) {
             var request = BsvFixtures.request(fixture);
             byte[] before = BsvSigningCodec.encodeRequest(request);
             Fake fake = new Fake(fixture);

@@ -29,3 +29,8 @@ This fork adds an explicit BCH/BSV route over the existing Java implementation.
 See [API, validation and limits](docs/bsv-ledger.md) and
 [modification record](MODIFICATIONS-GOSHAWK.md). It is experimental and has no
 Java-device certification yet; the original Bitcoin PSBT API remains separate.
+
+The Goshawk BSV branch requires the maintained Drongo fork pinned by Goshawk,
+including `BsvTransaction`. Build the parent checkout with its submodule commits.
+Goshawk uses the BSV API for its hardware button; upstream Bitcoin classes are not
+an alternate product signing route. P2SH recovery is deliberately unsupported.

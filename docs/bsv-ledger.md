@@ -6,7 +6,7 @@ It is experimental host integration, not a certified hardware-wallet release.
 
 ## Public API
 
-The BSV API is separate from the existing Bitcoin PSBT methods. As with other
+Goshawk calls only the explicit BSV API. Upstream hardware classes remain for source compatibility, but are not alternate signing routes in Goshawk. As with other
 Lark operations, callers must run device work off the GUI thread:
 
 ```java
@@ -49,9 +49,7 @@ PIN entered on the host, application installed or firmware changed.
 `BsvSigningRequest` takes a detached non-witness transaction with empty scriptSigs,
 explicit amounts and scripts for every input, compressed public keys in script
 order, optional complete raw parents, selected targets and existing signatures.
-The supported input models are P2PKH, bare multisig and explicitly supplied legacy
-P2SH multisig redeem scripts. The wallet must establish pre-Genesis eligibility
-before using a P2SH input. This library does not infer UTXO age from script bytes.
+The supported input models are P2PKH and bare multisig. P2SH inputs, including historical recovery, are rejected.
 
 The host validates the six ForkID-0 digest combinations `41/42/43/c1/c2/c3`.
 Ledger BCH signs only `0x41`; arbitrary scripts, witness/Taproot, other Ledger
@@ -79,7 +77,7 @@ Finalization requires each input threshold and emits signatures in script order.
 `BsvSigningCodec` is bounded, versioned **Goshawk signing JSON**, not ElectrumSVP JSON
 or PSBT. It includes explicit BSV chain/format identifiers and retains incomplete
 signatures. Do not admit a result against a request supplied by an untrusted signer.
-There is no PSBT-to-BSV bridge, networking, broadcast or payment acknowledgement here.
+The Goshawk parent project supplies a strict editor-container-to-BSV bridge. This library contains no networking, broadcast or payment acknowledgement.
 
 ## Evidence and provenance
 

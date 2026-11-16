@@ -9,8 +9,12 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class BsvSigningRequestTest {
+    @Test void rejectsP2shEvenWhenTheRedeemScriptMatches() {
+        assertThrows(IllegalArgumentException.class, () -> BsvFixtures.request(2));
+    }
+
     @Test void agreesWithBitcoinXForSixModesAndAllScripts() {
-        for(int fixture = 0; fixture < 3; fixture++) {
+        for(int fixture = 0; fixture < 2; fixture++) {
             var request = BsvFixtures.request(fixture);
             for(int input = 0; input < 2; input++) for(int mode : BsvSigningRequest.SIGHASHES) {
                 assertEquals(BsvFixtures.vector(fixture).get("hashes").get(input + ":" + String.format("%02x", mode)).asText(), Utils.bytesToHex(request.hash(input, mode).getBytes()));
@@ -20,7 +24,7 @@ class BsvSigningRequestTest {
     }
 
     @Test void partialSigningPreservesCosignerAndFinalizesInScriptOrder() {
-        for(int fixture = 0; fixture < 3; fixture++) {
+        for(int fixture = 0; fixture < 2; fixture++) {
             var request = BsvFixtures.request(fixture);
             byte[] before = BsvSigningCodec.encodeRequest(request);
             var one = request.apply(new BsvSigningRequest.Result(request.id(), List.of(BsvFixtures.signature(fixture, 1, 0x41))));
