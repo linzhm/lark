@@ -1,3 +1,4 @@
+<!-- Modified for Goshawk BSV integration, 2026-11-16; see MODIFICATIONS-GOSHAWK.md. -->
 # Lark
 
 Lark is Java library for interacting with USB hardware wallets in Bitcoin related functions. 
@@ -22,3 +23,9 @@ for(HardwareClient client : clients) {
     ExtendedKey xpub = lark.getPubKeyAtPath(client.getType(), client.getPath(), "m/84'/1'/0'");
 }
 ```
+## Goshawk BSV integration
+
+This fork adds an explicit BCH/BSV route over the existing Java implementation.
+See [API, validation and limits](docs/bsv-ledger.md) and
+[modification record](MODIFICATIONS-GOSHAWK.md). It is experimental and has no
+Java-device certification yet; the original Bitcoin PSBT API remains separate.

@@ -1,3 +1,4 @@
+// Modified for Goshawk BSV integration, 2026-11-16.
 package com.sparrowwallet.lark;
 
 import com.fazecast.jSerialComm.SerialPort;
@@ -8,6 +9,9 @@ import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.silentpayments.SilentPaymentScanAddress;
 import com.sparrowwallet.drongo.wallet.WalletModel;
 import com.sparrowwallet.lark.bitbox02.BitBoxNoiseConfig;
+import com.sparrowwallet.lark.bsv.*;
+import com.sparrowwallet.lark.ledger.BsvLedgerDevice;
+import com.sparrowwallet.lark.ledger.BsvAppSession;
 import com.sparrowwallet.lark.trezor.TrezorNoiseConfig;
 import com.sparrowwallet.tern.http.client.HttpClientService;
 import org.hid4java.HidDevice;
@@ -42,6 +46,81 @@ public class Lark {
 
     public Lark(HttpClientService httpClientService) {
         this.httpClientService = httpClientService;
+    }
+
+    /** BSV discovery never requests a root key from BCH's restricted derivation API. */
+    public List<BsvDeviceInfo> enumerateBsvLedgers() throws DeviceException {
+        List<BsvDeviceInfo> result = new ArrayList<>();
+        enumerate(new ClientOperation() {
+            public boolean requires(Interface type) { return type == Interface.HID; }
+            public boolean matches(HardwareClient client) { return client instanceof LedgerClient; }
+            public void apply(HardwareClient client) { result.add(((LedgerClient)client).bsvStatus()); }
+            public boolean success() { return true; }
+        });
+        // Identical model/serial fields cannot authenticate a reconnect. Disambiguate by USB path.
+        return result.stream().map(info -> result.stream().filter(other -> other.identity().equals(info.identity())).count() > 1
+                ? info.withPathIdentity() : info).toList();
+    }
+
+    public BsvDeviceInfo openBsvLedgerApp(BsvDeviceInfo selected) throws DeviceException {
+        Objects.requireNonNull(selected);
+        synchronized(lock) {
+            return BsvAppSession.open(selected, new BsvAppSession.Access() {
+                public List<BsvDeviceInfo> scan() throws DeviceException { return enumerateBsvLedgers(); }
+                public void switchApp(String path, boolean open) throws DeviceException {
+                    bsvClientOperation(path, client -> { client.switchBsvApp(open); return null; });
+                }
+                public void pause() throws InterruptedException { Thread.sleep(100); }
+            }, System::nanoTime);
+        }
+    }
+
+    public BsvAccount getBsvAccount(String devicePath, String accountPath) throws DeviceException {
+        return bsvOperation(devicePath, device -> device.readAccount(accountPath));
+    }
+
+    public String displayBsvAddress(String devicePath, BsvAccount account, String path) throws DeviceException {
+        return bsvOperation(devicePath, device -> device.displayAddress(account, path));
+    }
+
+    public String signBsvMessage(String devicePath, BsvAccount account, String path, String message) throws DeviceException {
+        return bsvOperation(devicePath, device -> device.signMessage(account, path, message));
+    }
+
+    public BsvSigningRequest.VerificationPlan planBsvSigning(String devicePath, BsvSigningRequest request) throws DeviceException {
+        return bsvOperation(devicePath, device -> device.plan(request));
+    }
+
+    public BsvSigningRequest.Result signBsvTransaction(String devicePath, BsvAccount account, BsvSigningRequest request,
+                                                     BsvSigningRequest.VerificationPolicy policy) throws DeviceException {
+        return bsvOperation(devicePath, device -> device.sign(request, account, policy));
+    }
+
+    private interface BsvAction<T> { T run(BsvLedgerDevice device) throws DeviceException; }
+    private interface BsvClientAction<T> { T run(LedgerClient client) throws DeviceException; }
+
+    private <T> T bsvOperation(String path, BsvAction<T> action) throws DeviceException {
+        return bsvClientOperation(path, client -> {
+            try(BsvLedgerDevice device = client.openBsvDevice()) { return action.run(device); }
+        });
+    }
+
+    private <T> T bsvClientOperation(String path, BsvClientAction<T> action) throws DeviceException {
+        if(path == null || path.isBlank()) throw new DeviceException("Select a specific Ledger device");
+        class Operation extends AbstractClientOperation {
+            T result;
+            boolean done;
+            Operation() { super("ledger", path); }
+            public void apply(HardwareClient client) throws DeviceException {
+                if(done) throw new DeviceException("Ambiguous Ledger selection");
+                result = action.run((LedgerClient)client);
+                done = true;
+            }
+            public boolean success() { return done; }
+        }
+        Operation operation = new Operation();
+        enumerate(operation);
+        return operation.result;
     }
 
     /**
